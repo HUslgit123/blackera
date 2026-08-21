@@ -202,7 +202,7 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
                 NSString *selStr = NSStringFromSelector(s);
                 
                 if ([selStr rangeOfString:@"gdt"].location != NSNotFound ||
-                    [selStr rangeInsensitiveRangeOfString:@"reward"].location != NSNotFound) {
+                    [selStr rangeOfString:@"reward" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                     
                     AddLog([NSString stringWithFormat:@"  - %@", selStr]);
                     shown++;
@@ -312,9 +312,9 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
                 SEL s = method_getName(methods[i]);
                 NSString *selStr = NSStringFromSelector(s);
                 
-                if ([selStr rangeInsensitiveRangeOfString:@"wash"].location != NSNotFound ||
-                    [selStr rangeInsensitiveRangeOfString:@"reset"].location != NSNotFound ||
-                    [selStr rangeInsensitiveRangeOfString:@"rebirth"].location != NSNotFound) {
+                if ([selStr rangeOfString:@"wash" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                    [selStr rangeOfString:@"reset" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                    [selStr rangeOfString:@"rebirth" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                     
                     AddLog([NSString stringWithFormat:@"  - %@", selStr]);
                     shown++;
@@ -377,9 +377,9 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
                 SEL s = method_getName(methods[i]);
                 NSString *selStr = NSStringFromSelector(s);
                 
-                if ([selStr rangeInsensitiveRangeOfString:@"button"].location != NSNotFound ||
-                    [selStr rangeInsensitiveRangeOfString:@"gm"].location != NSNotFound ||
-                    [selStr rangeInsensitiveRangeOfString:@"cz"].location != NSNotFound) {
+                if ([selStr rangeOfString:@"button" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                    [selStr rangeOfString:@"gm" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                    [selStr rangeOfString:@"cz" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                     
                     AddLog([NSString stringWithFormat:@"  - %@", selStr]);
                 }
@@ -718,7 +718,7 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
             for (UIButton *btn in sv.subviews) {
                 NSString *title = btn.currentTitle ?: @"";
                 
-                if ([title rangeInsensitiveRangeOfString:@"gm全装注入"].location != NSNotFound) {
+                if ([title rangeOfString:@"gm全装注入" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                     [btn setTitle:g_feature6_enabled ? 
                         @"⚙️ GM全装注入:【已开启】" : 
                         @"⚙️ GM全装注入:【已关闭】" 
@@ -754,7 +754,7 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
             for (UIButton *btn in sv.subviews) {
                 NSString *title = btn.currentTitle ?: @"";
                 
-                if ([title rangeInsensitiveRangeOfString:@"公告拦截"].location != NSNotFound) {
+                if ([title rangeOfString:@"公告拦截" options:NSCaseInsensitiveSearch].location != NSNotFound) {
                     [btn setTitle:g_intercept_announce ? 
                         @"🔇 全服公告拦截:【已开启】" : 
                         @"🔊 全服公告拦截:【已关闭】" 
@@ -776,20 +776,6 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     }
     
     AddLog(g_hudVisible ? @"[📊] HUD日志面板已显示" : @"[📊] HUD日志面板已隐藏");
-}
-
-@end
-
-#pragma mark - ============ Utility: rangeInsensitiveRangeOfString ============
-
-@interface NSString (CaseInsensitiveRange)
-- (NSRange)rangeInsensitiveRangeOfString:(NSString *)searchString;
-@end
-
-@implementation NSString (CaseInsensitiveRange)
-
-- (NSRange)rangeInsensitiveRangeOfString:(NSString *)searchString {
-    return [self rangeOfString:searchString options:NSCaseInsensitiveSearch];
 }
 
 @end
