@@ -218,7 +218,7 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     AddLog(@"[💎] 启动自动刷灵石: 0.3s/次 x 20次");
     
     // Capture VC weakly to avoid retain cycle with blocks
-    __weak id weakSelfVC = targetVC;
+    __unsafe_unretained id weakSelfVC = targetVC;
     
     for (int i = 0; i < 20; i++) {
         int idx = i;
