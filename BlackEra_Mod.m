@@ -58,7 +58,6 @@ static void AddLog(NSString *msg) {
 #pragma mark - ============ Forward Declarations ============
 
 static void HUDInit(void);
-static void UpdateStatusHUD(void);
 static void ToggleHUDVisibility(void);
 static void ClearLogsInternal(void);
 
@@ -165,7 +164,8 @@ id BE_Bcloud_CallFunc_Block(id self, SEL _cmd, NSString *functionName, NSDiction
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(idx * intervalSecs * NSEC_PER_SEC)), 
                        dispatch_get_main_queue(), ^{
             @autoreleasepool {
-                objc_msgSend(optionVC, sel, nil);
+                // 解决 objc_msgSend 类型转换报错，明确定义函数指针签名
+                ((void (*)(id, SEL, id))objc_msgSend)(optionVC, sel, nil);
                 AddLog([NSString stringWithFormat:@"[CLAIM] Executed #%d", idx + 1]);
             }
         });
@@ -201,15 +201,20 @@ id BE_Bcloud_CallFunc_Block(id self, SEL _cmd, NSString *functionName, NSDiction
 
 - (id)findViewControllerOfClass:(Class)targetClass inRootVC:(UIViewController *)root {
     if (!root || !targetClass) return nil;
+    
     if ([root isKindOfClass:targetClass]) return root;
-    for (UIViewController *child in root.children) {
+    
+    // 修复：将 root.children 改为兼容性更好的 childViewControllers
+    for (UIViewController *child in root.childViewControllers) {
         id found = [self findViewControllerOfClass:targetClass inRootVC:child];
         if (found) return found;
     }
+    
     if (root.presentedViewController) {
         id found = [self findViewControllerOfClass:targetClass inRootVC:root.presentedViewController];
         if (found) return found;
     }
+    
     return nil;
 }
 
@@ -250,7 +255,17 @@ id BE_Bcloud_CallFunc_Block(id self, SEL _cmd, NSString *functionName, NSDiction
 }
 
 + (void)openActionSheet {
-    UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
+    // 兼容 iOS 13+ 的活跃窗口获取方式
+    UIWindow *targetWindow = nil;
+    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        if (window.isKeyWindow) {
+            targetWindow = window;
+            break;
+        }
+    }
+    if (!targetWindow) targetWindow = [UIApplication sharedApplication].windows.firstObject;
+
+    UIViewController *root = targetWindow.rootViewController;
     while (root.presentedViewController) root = root.presentedViewController;
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"⚡ 修仙辅助控制台 ⚡" message:@"选择功能" preferredStyle:UIAlertControllerStyleActionSheet];
