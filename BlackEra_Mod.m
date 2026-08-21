@@ -1,5 +1,5 @@
 /*
- * BlackEra_Mod_v3.dylib — 《黑色纪元》修改器 (面板布局与动态Hook终极修复版)
+ * BlackEra_Mod.dylib — 《黑色纪元》修改器 (ARC与语法终极修复版)
  */
 
 #import <UIKit/UIKit.h>
@@ -27,7 +27,7 @@ static NSString *Timestamp(void) {
 }
 
 static void AddLog(NSString *msg) {
-    if (!g_logs) g_logs = [NSMutableArray arrayWithCapacity:100];
+    if (!g_logs) g_logs = [[NSMutableArray alloc] initWithCapacity:100];
     
     NSString *full = [NSString stringWithFormat:@"%@ %@", Timestamp(), msg];
     [g_logs addObject:full];
@@ -68,7 +68,6 @@ static Method FindMethodContains(Class cls, NSString *keyword) {
     }
     if (methods) free(methods);
     
-    // Check superclass
     Class superCls = class_getSuperclass(cls);
     if (superCls && superCls != [NSObject class]) {
         return FindMethodContains(superCls, keyword);
@@ -104,7 +103,7 @@ static id GetVCByKeyword(NSString *keyword) {
     return nil;
 }
 
-#pragma mark - ============ 广播拦截 Hook (动态模糊匹配) ============
+#pragma mark - ============ 广播拦截 Hook ============
 
 static IMP orig_bcloud_callFunc_IMP = NULL;
 static void BE_Bcloud_CallFunc(id self, SEL _cmd, NSString *functionName, NSDictionary *params, void (^block)(id result, NSError *error)) {
@@ -174,18 +173,15 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     }
     
     SEL sel = method_getName(m);
-    AddLog([NSString stringWithFormat:@"[💎] 准备开始刷灵石: 0.3s/次 x 20次 (方法: %@)", NSStringFromSelector(sel)]);
+    AddLog([NSString stringWithFormat:@"[💎] 准备开始刷灵石: 0.3s/次 x 20次"]);
     
-    __weak id weakVC = targetVC;
     for (int i = 0; i < 20; i++) {
         int idx = i;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(idx * 0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            id strongVC = weakVC;
-            if (!strongVC) return;
             @try {
-                ((void (*)(id, SEL, id, id))objc_msgSend)(strongVC, sel, nil, nil);
+                ((void (*)(id, SEL, id, id))objc_msgSend)(targetVC, sel, nil, nil);
             } @catch (...) {
-                @try { ((void (*)(id, SEL, id))objc_msgSend)(strongVC, sel, nil); } @catch (...) {}
+                @try { ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, nil); } @catch (...) {}
             }
             AddLog([NSString stringWithFormat:@"[✓] 灵石发放第 %d/20 次", idx + 1]);
         });
@@ -361,7 +357,7 @@ static UIButton *s_ball = nil;
     g_panelView.layer.cornerRadius = 14;
     g_panelView.layer.borderWidth = 1.5;
     g_panelView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:0.25 alpha:0.8].CGColor;
-    g_panelView.hidden = YES; // 默认隐藏
+    g_panelView.hidden = YES;
     
     UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, w - 24, 24)];
     lbl.text = @"⚡ 修仙修改器控制台 ⚡";
@@ -370,7 +366,6 @@ static UIButton *s_ball = nil;
     lbl.textAlignment = NSTextAlignmentCenter;
     [g_panelView addSubview:lbl];
     
-    // 增加高度，确保 ScrollView 内部所有 7 个按钮都能完整显示且不被截断
     UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectMake(8, 40, w - 16, h - 90)];
     sv.showsVerticalScrollIndicator = YES;
     
@@ -393,7 +388,7 @@ static UIButton *s_ball = nil;
         [UIColor colorWithRed:0.28 green:0.28 blue:0.35 alpha:1.0],
         [UIColor colorWithRed:0.75 green:0.20 blue:0.18 alpha:1.0],
         [UIColor colorWithRed:0.20 green:0.45 blue:0.30 alpha:1.0],
-        [UIColor colorWithRed:0.30 g_color_placeholder:0.30 alpha:1.0] // fallback
+        [UIColor colorWithRed:0.30 green:0.30 blue:0.38 alpha:1.0]
     ];
     
     NSArray *actions = @[
@@ -409,7 +404,7 @@ static UIButton *s_ball = nil;
     for (int i = 0; i < titles.count; i++) {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
         b.frame = CGRectMake(0, y, bw, bh);
-        b.backgroundColor = (i == 6) ? [UIColor colorWithRed:0.35 green:0.35 blue:0.4 alpha:1.0] : colors[i];
+        b.backgroundColor = colors[i];
         b.layer.cornerRadius = 7;
         b.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
         [b setTitle:titles[i] forState:UIControlStateNormal];
