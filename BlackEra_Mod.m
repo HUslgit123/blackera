@@ -1,4 +1,3 @@
-/*
  * BlackEra_Mod.dylib — 《黑色纪元》全能修改器 (整合版 v1.0)
  * 
  * 功能:
@@ -984,4 +983,3 @@ skip_socket_hooks:;
 
 
 #pragma mark - ============ End of file ============
-*/
