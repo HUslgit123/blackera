@@ -29,7 +29,7 @@ jobs:
           -F"$SDK_PATH/System/Library/Frameworks" \
           -install_name @rpath/BlackEra_Mod.dylib \
           -o BlackEra_Mod.dylib \
-          Open BlackEra_Mod.m \
+          "BlackEra_Mod.m" \
           -framework UIKit \
           -framework Foundation \
           -lobjc
