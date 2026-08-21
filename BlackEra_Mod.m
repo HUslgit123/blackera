@@ -1,5 +1,5 @@
 /*
- * BlackEra_Mod.dylib — 《黑色纪元》修改器 (ARC与语法终极修复版)
+ * BlackEra_Mod.dylib — 《黑色纪元》修改器 (日志与拦截终极修复版)
  */
 
 #import <UIKit/UIKit.h>
@@ -14,7 +14,7 @@ static BOOL g_feature6_enabled   = NO;
 
 static NSMutableArray *g_logs     = nil;
 static UITextView     *g_logView  = nil;
-static BOOL           g_hudVisible = NO;
+static BOOL           g_hudVisible = NO; // 控制台HUD开关
 static UIView         *g_panelView = nil;
 
 static NSString *Timestamp(void) {
@@ -36,7 +36,7 @@ static void AddLog(NSString *msg) {
     NSLog(@"[BlackEra] %@", full);
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_logView || !g_hudVisible) return;
+        if (!g_logView) return;
         
         NSMutableString *all = [NSMutableString string];
         for (NSString *line in g_logs) {
@@ -86,7 +86,6 @@ static id GetVCByKeyword(NSString *keyword) {
             
             NSString *clsName = NSStringFromClass([vc class]);
             if ([clsName rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                AddLog([NSString stringWithFormat:@"[✓] 捕获界面实例: %@", clsName]);
                 return vc;
             }
             
@@ -103,15 +102,18 @@ static id GetVCByKeyword(NSString *keyword) {
     return nil;
 }
 
-#pragma mark - ============ 广播拦截 Hook ============
+#pragma mark - ============ 广播拦截 Hook (双重强力拦截) ============
 
 static IMP orig_bcloud_callFunc_IMP = NULL;
 static void BE_Bcloud_CallFunc(id self, SEL _cmd, NSString *functionName, NSDictionary *params, void (^block)(id result, NSError *error)) {
-    if (g_intercept_announce && functionName) {
-        if ([functionName rangeOfString:@"Send" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [functionName rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [functionName rangeOfString:@"message" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            AddLog([NSString stringWithFormat:@"[🛡️] 已阻断云端广播: %@", functionName]);
+    if (g_intercept_announce) {
+        AddLog([NSString stringWithFormat:@"[NetInterceptor] BmobCloud: %@", functionName ?: @"unknown"]);
+        if (functionName && ([functionName rangeOfString:@"Send" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                             [functionName rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                             [functionName rangeOfString:@"message" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                             [functionName rangeOfString:@"rare" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                             [functionName rangeOfString:@"broadcast" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+            AddLog([NSString stringWithFormat:@"[🛡️拦截成功] 屏蔽云端广播: %@", functionName]);
             if (block) block(@[@"success"], nil);
             return;
         }
@@ -123,11 +125,13 @@ static void BE_Bcloud_CallFunc(id self, SEL _cmd, NSString *functionName, NSDict
 
 static IMP orig_sendEvent_IMP = NULL;
 static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
-    if (g_intercept_announce && event) {
-        if ([event rangeOfString:@"announce" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [event rangeOfString:@"broadcast" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [event rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            AddLog([NSString stringWithFormat:@"[🛡️] 已阻断Socket广播: %@", event]);
+    if (g_intercept_announce) {
+        AddLog([NSString stringWithFormat:@"[NetInterceptor] SocketEvent: %@", event ?: @"unknown"]);
+        if (event && ([event rangeOfString:@"announce" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                      [event rangeOfString:@"broadcast" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                      [event rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                      [event rangeOfString:@"item" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+            AddLog([NSString stringWithFormat:@"[🛡️拦截成功] 屏蔽Socket事件: %@", event]);
             return;
         }
     }
@@ -156,11 +160,10 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
 }
 
 - (void)claimSpiritStonesLoop {
-    AddLog(@"[💎] 正在扫描领灵石目标...");
+    AddLog(@"[💎] 正在派发灵石...");
     id targetVC = GetVCByKeyword(@"Option") ?: GetVCByKeyword(@"Shop");
-    
     if (!targetVC) {
-        AddLog(@"[❌] 提示: 请先在游戏中切换到【设置】或【商城】界面！");
+        AddLog(@"[❌] 请先打开【设置】或【商城】界面！");
         return;
     }
     
@@ -168,13 +171,11 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     if (!m) m = FindMethodContains([targetVC class], @"reward");
     
     if (!m) {
-        AddLog(@"[❌] 未找到广告发奖方法");
+        AddLog(@"[❌] 未找到广告发奖接口");
         return;
     }
     
     SEL sel = method_getName(m);
-    AddLog([NSString stringWithFormat:@"[💎] 准备开始刷灵石: 0.3s/次 x 20次"]);
-    
     for (int i = 0; i < 20; i++) {
         int idx = i;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(idx * 0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -189,67 +190,86 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
 }
 
 - (void)triggerMakeActions {
-    AddLog(@"[⚒️] 正在扫描制造/炼器界面...");
+    AddLog(@"[⚒️] 正在触发制造/强化...");
     id targetVC = GetVCByKeyword(@"Make") ?: GetVCByKeyword(@"Forge") ?: GetVCByKeyword(@"Equipment");
     if (!targetVC) {
-        AddLog(@"[❌] 提示: 请先进入【制造/炼器/装备】界面！");
+        AddLog(@"[❌] 请先打开【制造/炼器】界面！");
         return;
     }
     
-    Method m = FindMethodContains([targetVC class], @"clickMakeButton") ?: FindMethodContains([targetVC class], @"clickButton");
-    if (!m) {
-        AddLog(@"[❌] 未找到制造交互方法");
-        return;
+    // 遍历所有按钮相关方法直接触发
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList([targetVC class], &count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if ([name rangeOfString:@"click" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"make" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"craft" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            @try {
+                UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, fakeBtn);
+                AddLog([NSString stringWithFormat:@"[⚒️] 已安全触发方法: %@", name]);
+            } @catch (...) {}
+        }
     }
-    
-    SEL sel = method_getName(m);
-    UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, fakeBtn);
-    AddLog([NSString stringWithFormat:@"[⚒️] 已触发制造接口: %@", NSStringFromSelector(sel)]);
+    if (methods) free(methods);
 }
 
 - (void)triggerPetRebirth {
-    AddLog(@"[🐾] 正在扫描灵宠界面...");
+    AddLog(@"[🐾] 正在触发灵宠洗练...");
     id targetVC = GetVCByKeyword(@"Pet") ?: GetVCByKeyword(@"Lingchong") ?: GetVCByKeyword(@"SpiritBeast");
     if (!targetVC) {
-        AddLog(@"[❌] 提示: 请先进入【灵宠】界面！");
+        AddLog(@"[❌] 请先打开【灵宠】界面！");
         return;
     }
     
-    Method m = FindMethodContains([targetVC class], @"clickWashButton") ?: FindMethodContains([targetVC class], @"clickButton");
-    if (!m) {
-        AddLog(@"[❌] 未找到灵宠洗练方法");
-        return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList([targetVC class], &count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if ([name rangeOfString:@"wash" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"reset" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"click" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            @try {
+                UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, fakeBtn);
+                AddLog([NSString stringWithFormat:@"[🐾] 已安全触发灵宠方法: %@", name]);
+            } @catch (...) {}
+        }
     }
-    
-    SEL sel = method_getName(m);
-    UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, fakeBtn);
-    AddLog([NSString stringWithFormat:@"[🐾] 已触发灵宠洗练: %@", NSStringFromSelector(sel)]);
+    if (methods) free(methods);
 }
 
 - (void)triggerFeature6 {
     if (!g_feature6_enabled) {
-        AddLog(@"[⚠️] 请先在控制台中将【GM全装注入开关】点成已开启！");
+        AddLog(@"[⚠️] 请先开启【GM全装注入开关】！");
         return;
     }
-    AddLog(@"[🎁] 正在扫描背包界面...");
+    AddLog(@"[🎁] 正在触发背包GM注入...");
     id bagVC = GetVCByKeyword(@"Bag") ?: GetVCByKeyword(@"Inventory");
     if (!bagVC) {
-        AddLog(@"[❌] 提示: 请先进入【背包】界面！");
+        AddLog(@"[❌] 请先打开【背包】界面！");
         return;
     }
     
-    Method m = FindMethodContains([bagVC class], @"clickCZButton") ?: FindMethodContains([bagVC class], @"clickGMButton");
-    if (!m) {
-        AddLog(@"[❌] 背包中未找到GM/CZ按钮接口");
-        return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList([bagVC class], &count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if ([name rangeOfString:@"cz" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"gm" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"debug" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            @try {
+                UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                ((void (*)(id, SEL, id))objc_msgSend)(bagVC, sel, fakeBtn);
+                AddLog([NSString stringWithFormat:@"[🎁] 已触发背包接口: %@", name]);
+            } @catch (...) {}
+        }
     }
-    
-    SEL sel = method_getName(m);
-    UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    ((void (*)(id, SEL, id))objc_msgSend)(bagVC, sel, fakeBtn);
-    AddLog([NSString stringWithFormat:@"[🎁] 已触发背包注入接口: %@", NSStringFromSelector(sel)]);
+    if (methods) free(methods);
 }
 
 @end
@@ -320,22 +340,22 @@ static UIButton *s_ball = nil;
         
         [rootVC.view addSubview:s_ball];
         
-        // 控制面板
-        [self buildPanel:rootVC.view bounds:bounds];
-        
-        // 日志视图
+        // 独立 HUD 日志视图 (始终挂载在顶层，不随面板隐藏而隐藏，可在右上角随时查看)
         g_logView = [[UITextView alloc] initWithFrame:CGRectMake(bounds.size.width - 250, 40, 240, 160)];
         g_logView.font = [UIFont fontWithName:@"Menlo" size:9] ?: [UIFont systemFontOfSize:9];
         g_logView.textColor = [UIColor colorWithRed:0.1 green:1.0 blue:0.3 alpha:1.0];
         g_logView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
         g_logView.layer.cornerRadius = 6;
         g_logView.editable = NO;
-        g_logView.hidden = YES;
+        g_logView.hidden = NO; // 默认直接显示日志，方便排查
         [rootVC.view addSubview:g_logView];
+        
+        // 控制面板
+        [self buildPanel:rootVC.view bounds:bounds];
         
         s_win.hidden = NO;
         [s_win makeKeyAndVisible];
-        AddLog(@"[✓] 控制台挂载成功");
+        AddLog(@"[✓] 修改器悬浮窗与日志常驻加载成功");
     });
 }
 
