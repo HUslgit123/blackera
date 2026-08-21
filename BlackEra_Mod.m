@@ -676,7 +676,7 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     newY = fmaxf(28, fminf(newY, bounds.size.height - 28));
     
     self.floatBall.center = CGPointMake(newX, newY);
-    [pan setTranslation:CGPointZero inView:superview];
+    [pan setTranslation:CGPointMake(0, 0) inView:superview];
 }
 
 #pragma mark - 面板显示切换
