@@ -1,11 +1,10 @@
 /*
- * BlackEra_Mod_v3.dylib — 《黑色纪元》修改器 (Swift穿透+编译修复版)
+ * BlackEra_Mod_v3.dylib — 《黑色纪元》修改器 (面板布局与动态Hook终极修复版)
  */
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#include <dispatch/dispatch.h>
 #include <time.h>
 
 #pragma mark - ============ 全局状态与日志 ============
@@ -53,108 +52,92 @@ static void AddLog(NSString *msg) {
     });
 }
 
-#pragma mark - ============ Swift混淆穿透查找引擎 ============
+#pragma mark - ============ 混淆穿透与方法查找引擎 ============
 
-static SEL FindMethodBySubstring(Class cls, NSString *keyword) {
+static Method FindMethodContains(Class cls, NSString *keyword) {
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
-    
     for (unsigned int i = 0; i < count; i++) {
         SEL sel = method_getName(methods[i]);
         NSString *selName = NSStringFromSelector(sel);
-        
         if ([selName rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            Method m = methods[i];
             free(methods);
-            return sel;
+            return m;
         }
     }
-    
     if (methods) free(methods);
-    return nil;
+    
+    // Check superclass
+    Class superCls = class_getSuperclass(cls);
+    if (superCls && superCls != [NSObject class]) {
+        return FindMethodContains(superCls, keyword);
+    }
+    return NULL;
 }
 
-static id GetVCByClassName(NSString *keyword) {
+static id GetVCByKeyword(NSString *keyword) {
     NSArray *windows = [UIApplication sharedApplication].windows;
-    
     for (UIWindow *w in windows) {
         NSMutableArray *toCheck = [NSMutableArray arrayWithObject:w.rootViewController];
-        
         while (toCheck.count > 0) {
             UIViewController *vc = [toCheck lastObject];
             [toCheck removeLastObject];
-            
             if (!vc) continue;
             
             NSString *clsName = NSStringFromClass([vc class]);
-            
             if ([clsName rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                AddLog([NSString stringWithFormat:@"[✓] 定位真实实例: %@", clsName]);
+                AddLog([NSString stringWithFormat:@"[✓] 捕获界面实例: %@", clsName]);
                 return vc;
             }
             
-            // Recurse into navigation/tab/child/presented VCs
             if ([vc isKindOfClass:[UINavigationController class]]) {
-                UINavigationController *nav = (UINavigationController *)vc;
-                [toCheck addObjectsFromArray:nav.viewControllers];
+                [toCheck addObjectsFromArray:((UINavigationController *)vc).viewControllers];
             } else if ([vc isKindOfClass:[UITabBarController class]]) {
                 UITabBarController *tab = (UITabBarController *)vc;
-                if (tab.viewControllers) {
-                    [toCheck addObjectsFromArray:tab.viewControllers];
-                }
+                if (tab.viewControllers) [toCheck addObjectsFromArray:tab.viewControllers];
             }
-            
-            if (vc.childViewControllers.count > 0) {
-                [toCheck addObjectsFromArray:vc.childViewControllers];
-            }
-            
-            if (vc.presentedViewController) {
-                [toCheck addObject:vc.presentedViewController];
-            }
+            if (vc.childViewControllers.count > 0) [toCheck addObjectsFromArray:vc.childViewControllers];
+            if (vc.presentedViewController) [toCheck addObject:vc.presentedViewController];
         }
     }
-    
-    AddLog([NSString stringWithFormat:@"[⚠️] 未找到包含 '%@' 的界面", keyword]);
     return nil;
 }
 
-#pragma mark - ============ Hook实现：广播拦截 ============
+#pragma mark - ============ 广播拦截 Hook (动态模糊匹配) ============
 
 static IMP orig_bcloud_callFunc_IMP = NULL;
-
 static void BE_Bcloud_CallFunc(id self, SEL _cmd, NSString *functionName, NSDictionary *params, void (^block)(id result, NSError *error)) {
     if (g_intercept_announce && functionName) {
-        NSRange r1 = [functionName rangeOfString:@"SendSystemMessage" options:NSCaseInsensitiveSearch];
-        NSRange r2 = [functionName rangeOfString:@"system" options:NSCaseInsensitiveSearch];
-        
-        if (r1.location != NSNotFound || r2.location != NSNotFound) {
-            AddLog(@"[🛡️] BmobCloud 系统广播已阻断");
+        if ([functionName rangeOfString:@"Send" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [functionName rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [functionName rangeOfString:@"message" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            AddLog([NSString stringWithFormat:@"[🛡️] 已阻断云端广播: %@", functionName]);
             if (block) block(@[@"success"], nil);
             return;
         }
     }
-    
-    // Call original with matching signature cast
-    ((void (*)(id, SEL, NSString *, NSDictionary *, void (^)(id, NSError *)))orig_bcloud_callFunc_IMP)
-        (self, _cmd, functionName, params, block);
+    if (orig_bcloud_callFunc_IMP) {
+        ((void (*)(id, SEL, NSString *, NSDictionary *, void (^)(id, NSError *)))orig_bcloud_callFunc_IMP)(self, _cmd, functionName, params, block);
+    }
 }
 
 static IMP orig_sendEvent_IMP = NULL;
-
 static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     if (g_intercept_announce && event) {
-        NSRange r1 = [event rangeOfString:@"announce" options:NSCaseInsensitiveSearch];
-        NSRange r2 = [event rangeOfString:@"broadcast" options:NSCaseInsensitiveSearch];
-        
-        if (r1.location != NSNotFound || r2.location != NSNotFound) {
-            AddLog([NSString stringWithFormat:@"[🛡️] Socket 广播已阻断: %@", event]);
+        if ([event rangeOfString:@"announce" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [event rangeOfString:@"broadcast" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [event rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            AddLog([NSString stringWithFormat:@"[🛡️] 已阻断Socket广播: %@", event]);
             return;
         }
     }
-    
-    ((void (*)(id, SEL, NSString *, id))orig_sendEvent_IMP)(self, _cmd, event, data);
+    if (orig_sendEvent_IMP) {
+        ((void (*)(id, SEL, NSString *, id))orig_sendEvent_IMP)(self, _cmd, event, data);
+    }
 }
 
-#pragma mark - ============ ModManager（业务逻辑） ============
+#pragma mark - ============ 业务控制器 ============
 
 @interface ModManager : NSObject
 + (instancetype)shared;
@@ -164,7 +147,7 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
 - (void)triggerFeature6;
 @end
 
-@implementation ModManager { }
+@implementation ModManager
 
 + (instancetype)shared {
     static ModManager *inst = nil;
@@ -174,699 +157,343 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
 }
 
 - (void)claimSpiritStonesLoop {
-    AddLog(@"[💎] 正在扫描设置/商城界面...");
-    
-    id targetVC = GetVCByClassName(@"OptionViewController");
-    if (!targetVC) targetVC = GetVCByClassName(@"ShopViewController");
+    AddLog(@"[💎] 正在扫描领灵石目标...");
+    id targetVC = GetVCByKeyword(@"Option") ?: GetVCByKeyword(@"Shop");
     
     if (!targetVC) {
-        AddLog(@"[❌] 请先在游戏中打开【设置】或【商城】界面！");
+        AddLog(@"[❌] 提示: 请先在游戏中切换到【设置】或【商城】界面！");
         return;
     }
     
-    // Fuzzy find the reward method (Ghidra: gdt_rewardVideoAdDidRewardEffective:)
-    SEL rewardSel = FindMethodBySubstring([targetVC class], @"rewardVideoAdDidRewardEffective");
+    Method m = FindMethodContains([targetVC class], @"rewardVideoAdDidRewardEffective");
+    if (!m) m = FindMethodContains([targetVC class], @"reward");
     
-    if (!rewardSel) {
-        AddLog(@"[❌] 该界面未找到广告发奖接口");
-        
-        // Debug: list methods containing "gdt" or "reward"
-        unsigned int count = 0;
-        Method *methods = class_copyMethodList([targetVC class], &count);
-        AddLog([NSString stringWithFormat:@"[DEBUG] %@ methods:", NSStringFromClass([targetVC class])]);
-        
-        if (methods) {
-            int shown = 0;
-            for (unsigned int i = 0; i < count && shown < 20; i++) {
-                SEL s = method_getName(methods[i]);
-                NSString *selStr = NSStringFromSelector(s);
-                
-                if ([selStr rangeOfString:@"gdt"].location != NSNotFound ||
-                    [selStr rangeOfString:@"reward" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    
-                    AddLog([NSString stringWithFormat:@"  - %@", selStr]);
-                    shown++;
-                }
-            }
-            
-            free(methods);
-        }
-        
+    if (!m) {
+        AddLog(@"[❌] 未找到广告发奖方法");
         return;
     }
     
-    AddLog(@"[💎] 启动自动刷灵石: 0.3s/次 x 20次");
+    SEL sel = method_getName(m);
+    AddLog([NSString stringWithFormat:@"[💎] 准备开始刷灵石: 0.3s/次 x 20次 (方法: %@)", NSStringFromSelector(sel)]);
     
-    // Capture VC weakly to avoid retain cycle with blocks
-    __unsafe_unretained id weakSelfVC = targetVC;
-    
+    __weak id weakVC = targetVC;
     for (int i = 0; i < 20; i++) {
         int idx = i;
-        
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(idx * 0.3 * NSEC_PER_SEC)), 
-                       dispatch_get_main_queue(), ^{
-            id strongVC = weakSelfVC;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(idx * 0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            id strongVC = weakVC;
             if (!strongVC) return;
-            
-            // ARM64 SAFE: Use properly cast function pointer matching parameter count
-            ((void (*)(id, SEL, id))objc_msgSend)(strongVC, rewardSel, nil);
-            
-            AddLog([NSString stringWithFormat:@"[✓] 灵石到账第 %d/20 次", idx + 1]);
+            @try {
+                ((void (*)(id, SEL, id, id))objc_msgSend)(strongVC, sel, nil, nil);
+            } @catch (...) {
+                @try { ((void (*)(id, SEL, id))objc_msgSend)(strongVC, sel, nil); } @catch (...) {}
+            }
+            AddLog([NSString stringWithFormat:@"[✓] 灵石发放第 %d/20 次", idx + 1]);
         });
     }
 }
 
 - (void)triggerMakeActions {
-    AddLog(@"[⚒️] 正在扫描制造界面...");
-    
-    id targetVC = GetVCByClassName(@"MakeViewController");
-    if (!targetVC) targetVC = GetVCByClassName(@"EquipmentViewController");
-    if (!targetVC) targetVC = GetVCByClassName(@"ForgeViewController");
-    
+    AddLog(@"[⚒️] 正在扫描制造/炼器界面...");
+    id targetVC = GetVCByKeyword(@"Make") ?: GetVCByKeyword(@"Forge") ?: GetVCByKeyword(@"Equipment");
     if (!targetVC) {
-        AddLog(@"[❌] 请先打开【制造/炼器/强化】界面！");
+        AddLog(@"[❌] 提示: 请先进入【制造/炼器/装备】界面！");
         return;
     }
     
-    // Try specific method first, then generic fallback
-    SEL chosenSel = FindMethodBySubstring([targetVC class], @"clickMakeButton") ?: 
-                    FindMethodBySubstring([targetVC class], @"startCraft");
-    
-    if (!chosenSel) {
-        // Last resort: find any "click" method (risky but may work)
-        chosenSel = FindMethodBySubstring([targetVC class], @"clickButton");
-        
-        if (!chosenSel) {
-            AddLog(@"[❌] 未匹配到制造方法，请查看DEBUG日志中的可用方法列表");
-            
-            // Debug list all methods
-            unsigned int count;
-            Method *methods = class_copyMethodList([targetVC class], &count);
-            if (methods) {
-                AddLog(@"[DEBUG] Available methods:");
-                for (unsigned int j = 0; j < MIN(count, 25u); j++) {
-                    SEL s = method_getName(methods[j]);
-                    AddLog([NSString stringWithFormat:@"  - %@", NSStringFromSelector(s)]);
-                }
-                free(methods);
-            }
-            
-            return;
-        }
+    Method m = FindMethodContains([targetVC class], @"clickMakeButton") ?: FindMethodContains([targetVC class], @"clickButton");
+    if (!m) {
+        AddLog(@"[❌] 未找到制造交互方法");
+        return;
     }
     
+    SEL sel = method_getName(m);
     UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    
-    // ARM64 SAFE: Cast to match (id, SEL, id) signature
-    ((void (*)(id, SEL, id))objc_msgSend)(targetVC, chosenSel, fakeBtn);
-    
-    AddLog([NSString stringWithFormat:@"[⚒️] 成功触发制造接口: %@", NSStringFromSelector(chosenSel)]);
+    ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, fakeBtn);
+    AddLog([NSString stringWithFormat:@"[⚒️] 已触发制造接口: %@", NSStringFromSelector(sel)]);
 }
 
 - (void)triggerPetRebirth {
     AddLog(@"[🐾] 正在扫描灵宠界面...");
-    
-    id targetVC = GetVCByClassName(@"PetViewController");
-    if (!targetVC) targetVC = GetVCByClassName(@"SpiritBeastViewController");
-    if (!targetVC) targetVC = GetVCByClassName(@"LingchongViewController");
-    
+    id targetVC = GetVCByKeyword(@"Pet") ?: GetVCByKeyword(@"Lingchong") ?: GetVCByKeyword(@"SpiritBeast");
     if (!targetVC) {
-        AddLog(@"[❌] 请先打开【灵宠】界面！");
+        AddLog(@"[❌] 提示: 请先进入【灵宠】界面！");
         return;
     }
     
-    SEL chosenSel = FindMethodBySubstring([targetVC class], @"clickWashButton") ?:
-                    FindMethodBySubstring([targetVC class], @"freeReset");
-    
-    if (!chosenSel) {
-        AddLog(@"[❌] 未匹配到洗练方法");
-        
-        // Debug: list wash/reset/rebirth related methods
-        unsigned int count;
-        Method *methods = class_copyMethodList([targetVC class], &count);
-        AddLog(@"[DEBUG] Pet-related methods:");
-        
-        if (methods) {
-            int shown = 0;
-            for (unsigned int i = 0; i < count && shown < 20; i++) {
-                SEL s = method_getName(methods[i]);
-                NSString *selStr = NSStringFromSelector(s);
-                
-                if ([selStr rangeOfString:@"wash" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                    [selStr rangeOfString:@"reset" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                    [selStr rangeOfString:@"rebirth" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    
-                    AddLog([NSString stringWithFormat:@"  - %@", selStr]);
-                    shown++;
-                }
-            }
-            
-            free(methods);
-        }
-        
+    Method m = FindMethodContains([targetVC class], @"clickWashButton") ?: FindMethodContains([targetVC class], @"clickButton");
+    if (!m) {
+        AddLog(@"[❌] 未找到灵宠洗练方法");
         return;
     }
     
+    SEL sel = method_getName(m);
     UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    
-    ((void (*)(id, SEL, id))objc_msgSend)(targetVC, chosenSel, fakeBtn);
-    
-    AddLog([NSString stringWithFormat:@"[🐾] 成功触发灵宠洗练接口: %@", NSStringFromSelector(chosenSel)]);
+    ((void (*)(id, SEL, id))objc_msgSend)(targetVC, sel, fakeBtn);
+    AddLog([NSString stringWithFormat:@"[🐾] 已触发灵宠洗练: %@", NSStringFromSelector(sel)]);
 }
 
 - (void)triggerFeature6 {
     if (!g_feature6_enabled) {
-        AddLog(@"[⚠️] 功能六未开启，请先开启控制台开关！");
+        AddLog(@"[⚠️] 请先在控制台中将【GM全装注入开关】点成已开启！");
         return;
     }
-    
     AddLog(@"[🎁] 正在扫描背包界面...");
-    
-    id bagVC = GetVCByClassName(@"BagViewController");
-    if (!bagVC) bagVC = GetVCByClassName(@"InventoryViewController");
-    
+    id bagVC = GetVCByKeyword(@"Bag") ?: GetVCByKeyword(@"Inventory");
     if (!bagVC) {
-        AddLog(@"[❌] 请先打开【背包】界面！");
+        AddLog(@"[❌] 提示: 请先进入【背包】界面！");
         return;
     }
     
-    SEL czSel = FindMethodBySubstring([bagVC class], @"clickCZButton");
-    SEL gmSel = FindMethodBySubstring([bagVC class], @"clickGMButton");
-    
-    UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    
-    if (czSel) {
-        // ARM64 SAFE cast
-        ((void (*)(id, SEL, id))objc_msgSend)(bagVC, czSel, fakeBtn);
-        AddLog(@"[🎁] 已触发 CZ/GM 全装注入");
-        
-    } else if (gmSel) {
-        ((void (*)(id, SEL, id))objc_msgSend)(bagVC, gmSel, fakeBtn);
-        AddLog(@"[🎁] 已触发 GM 菜单");
-        
-    } else {
-        AddLog(@"[❌] 该界面未暴露GM接口，请查看DEBUG列表中的button相关方法");
-        
-        // Debug list button methods
-        unsigned int count;
-        Method *methods = class_copyMethodList([bagVC class], &count);
-        if (methods) {
-            AddLog(@"[DEBUG] Button-related methods on BagVC:");
-            
-            for (unsigned int i = 0; i < MIN(count, 30u); i++) {
-                SEL s = method_getName(methods[i]);
-                NSString *selStr = NSStringFromSelector(s);
-                
-                if ([selStr rangeOfString:@"button" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                    [selStr rangeOfString:@"gm" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                    [selStr rangeOfString:@"cz" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    
-                    AddLog([NSString stringWithFormat:@"  - %@", selStr]);
-                }
-            }
-            
-            free(methods);
-        }
+    Method m = FindMethodContains([bagVC class], @"clickCZButton") ?: FindMethodContains([bagVC class], @"clickGMButton");
+    if (!m) {
+        AddLog(@"[❌] 背包中未找到GM/CZ按钮接口");
+        return;
     }
+    
+    SEL sel = method_getName(m);
+    UIButton *fakeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    ((void (*)(id, SEL, id))objc_msgSend)(bagVC, sel, fakeBtn);
+    AddLog([NSString stringWithFormat:@"[🎁] 已触发背包注入接口: %@", NSStringFromSelector(sel)]);
 }
 
 @end
 
-#pragma mark - ============ 穿透Overlay窗口（hitTest修复） ============
+#pragma mark - ============ 穿透 Overlay 窗口 ============
 
 @interface BEOverlayWindow : UIWindow
 @end
 
-@implementation BEOverlayWindow { }
-
-// FIXED: Properly filter out rootVC.view to allow clicks through empty areas
+@implementation BEOverlayWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (!self.userInteractionEnabled || self.isHidden || self.alpha <= 0.01) {
-        return nil;
-    }
-    
     UIView *hitView = [super hitTest:point withEvent:event];
-    
-    // Pass through clicks on:
-    // - the window itself (empty area)
-    // - rootVC's view (transparent container)  
-    // - any non-interactive subviews
-    if (!hitView || 
-        hitView == self ||
-        hitView == self.rootViewController.view ||
-        ([hitView isKindOfClass:[UIView class]] && !hitView.userInteractionEnabled)) {
-        
-        return nil; // Click passes through to game
-    }
-    
-    return hitView; // Let UI elements (buttons, scroll views) receive touch normally
+    if (hitView == self || hitView == self.rootViewController.view) return nil;
+    return hitView;
 }
-
 @end
 
-#pragma mark - ============ 悬浮UI界面（编译修复版） ============
+#pragma mark - ============ 悬浮 UI 控制台 ============
 
 @interface FloatingMenuUI : NSObject
-@property (nonatomic, strong) BEOverlayWindow *overlayWin;
-@property (nonatomic, strong) UIButton *floatBall;
-+ (instancetype)shared;
 + (void)showFloatingBall;
 @end
 
-@implementation FloatingMenuUI { }
+@implementation FloatingMenuUI
 
-@synthesize overlayWin = _overlayWin;
-@synthesize floatBall  = _floatBall;
-
-+ (instancetype)shared {
-    static FloatingMenuUI *inst = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ inst = [[FloatingMenuUI alloc] init]; });
-    return inst;
-}
+static BEOverlayWindow *s_win = nil;
+static UIButton *s_ball = nil;
 
 + (void)showFloatingBall {
-    [[FloatingMenuUI shared] setupOverlayWindow];
-}
-
-- (void)setupOverlayWindow {
-    if (self.overlayWin && !self.overlayWin.isHidden) {
-        AddLog(@"[INFO] 控制台已存在，跳过重复创建");
-        return;
-    }
+    if (s_win) return;
     
-    CGRect bounds = [UIScreen mainScreen].bounds;
-    
-    // Get proper window scene for iOS 13+
-    UIWindowScene *activeScene = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]] && 
-                ((UIWindowScene *)scene).activationState == UISceneActivationStateForegroundActive) {
-                
-                activeScene = (UIWindowScene *)scene;
-                break;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CGRect bounds = [UIScreen mainScreen].bounds;
+        UIWindowScene *activeScene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                    activeScene = (UIWindowScene *)scene;
+                    break;
+                }
             }
         }
-    }
-    
-    self.overlayWin = activeScene ? [[BEOverlayWindow alloc] initWithWindowScene:activeScene] 
-                                 : [[BEOverlayWindow alloc] initWithFrame:bounds];
-    
-    // Ensure valid frame
-    if (!self.overlayWin.frame.size.width || !self.overlayWin.frame.size.height) {
-        self.overlayWin.frame = bounds;
-    }
-    
-    self.overlayWin.windowLevel = UIWindowLevelAlert + 100;
-    self.overlayWin.backgroundColor = [UIColor clearColor];
-    
-    // Root VC with clear background view
-    UIViewController *rootVC = [[UIViewController alloc] init];
-    rootVC.view.backgroundColor = [UIColor clearColor];
-    self.overlayWin.rootViewController = rootVC;
-    
-    UIView *containerView = rootVC.view;
-    
-    // === 悬浮球 (左下角,可拖动) ===
-    UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
-    ball.frame = CGRectMake(15, bounds.size.height - 140, 56, 56);
-    ball.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:0.1 alpha:0.9];
-    ball.layer.cornerRadius = 28;
-    ball.layer.borderWidth = 2.0;
-    ball.layer.borderColor = [UIColor whiteColor].CGColor;
-    ball.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    ball.userInteractionEnabled = YES;
-    
-    [ball setTitle:@"作弊" forState:UIControlStateNormal];
-    [ball setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    
-    // Pan gesture for dragging (must be added first)
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleBallPan:)];
-    [ball addGestureRecognizer:pan];
-    
-    // Tap gesture - FIXED: Use requireGestureRecognizerToFail instead of .requirements property
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleCustomPanel)];
-    [tap requireGestureRecognizerToFail:pan]; // Only fires if pan didn't detect movement
-    [ball addGestureRecognizer:tap];
-    
-    self.floatBall = ball;
-    [containerView addSubview:ball];
-    
-    // Build control panel and HUD
-    [self buildControlPanelInView:containerView withBounds:bounds];
-    
-    g_logView = [[UITextView alloc] initWithFrame:CGRectMake(bounds.size.width - 250, 40, 240, 160)];
-    g_logView.font = [UIFont fontWithName:@"Menlo" size:9];
-    if (!g_logView.font) {
-        g_logView.font = [UIFont systemFontOfSize:9];
-    }
-    
-    g_logView.textColor = [UIColor colorWithRed:0.1 green:1.0 blue:0.3 alpha:1.0];
-    g_logView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
-    g_logView.layer.cornerRadius = 6;
-    g_logView.editable = NO;
-    g_logView.hidden = YES;
-    [containerView addSubview:g_logView];
-    
-    self.overlayWin.userInteractionEnabled = YES;
-    self.overlayWin.hidden = NO;
-    [self.overlayWin makeKeyAndVisible];
-    
-    AddLog(@"[✓] BlackEra Mod v3 界面挂载成功");
+        
+        s_win = activeScene ? [[BEOverlayWindow alloc] initWithWindowScene:activeScene] : [[BEOverlayWindow alloc] initWithFrame:bounds];
+        s_win.windowLevel = UIWindowLevelAlert + 100;
+        s_win.backgroundColor = [UIColor clearColor];
+        
+        UIViewController *rootVC = [[UIViewController alloc] init];
+        rootVC.view.backgroundColor = [UIColor clearColor];
+        s_win.rootViewController = rootVC;
+        
+        // 悬浮球
+        s_ball = [UIButton buttonWithType:UIButtonTypeCustom];
+        s_ball.frame = CGRectMake(15, bounds.size.height - 140, 56, 56);
+        s_ball.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:0.1 alpha:0.9];
+        s_ball.layer.cornerRadius = 28;
+        s_ball.layer.borderWidth = 2.0;
+        s_ball.layer.borderColor = [UIColor whiteColor].CGColor;
+        [s_ball setTitle:@"作弊" forState:UIControlStateNormal];
+        s_ball.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [s_ball addGestureRecognizer:pan];
+        
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(togglePanel)];
+        [tap requireGestureRecognizerToFail:pan];
+        [s_ball addGestureRecognizer:tap];
+        
+        [rootVC.view addSubview:s_ball];
+        
+        // 控制面板
+        [self buildPanel:rootVC.view bounds:bounds];
+        
+        // 日志视图
+        g_logView = [[UITextView alloc] initWithFrame:CGRectMake(bounds.size.width - 250, 40, 240, 160)];
+        g_logView.font = [UIFont fontWithName:@"Menlo" size:9] ?: [UIFont systemFontOfSize:9];
+        g_logView.textColor = [UIColor colorWithRed:0.1 green:1.0 blue:0.3 alpha:1.0];
+        g_logView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
+        g_logView.layer.cornerRadius = 6;
+        g_logView.editable = NO;
+        g_logView.hidden = YES;
+        [rootVC.view addSubview:g_logView];
+        
+        s_win.hidden = NO;
+        [s_win makeKeyAndVisible];
+        AddLog(@"[✓] 控制台挂载成功");
+    });
 }
 
-#pragma mark - 构建控制面板（FIXED: explicit Block type declaration, no auto）
++ (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *superview = s_ball.superview;
+    CGPoint trans = [pan translationInView:superview];
+    CGFloat newX = fmaxf(28, fminf(s_ball.center.x + trans.x, superview.bounds.size.width - 28));
+    CGFloat newY = fmaxf(28, fminf(s_ball.center.y + trans.y, superview.bounds.size.height - 28));
+    s_ball.center = CGPointMake(newX, newY);
+    [pan setTranslation:CGPointMake(0, 0) inView:superview];
+}
 
-- (void)buildControlPanelInView:(UIView *)parent withBounds:(CGRect)bounds {
-    CGFloat panelW = MIN(320.0f, bounds.size.width - 40);
-    CGFloat panelH = 380;
++ (void)buildPanel:(UIView *)parent bounds:(CGRect)bounds {
+    CGFloat w = MIN(320, bounds.size.width - 40);
+    CGFloat h = 400;
     
-    g_panelView = [[UIView alloc] initWithFrame:CGRectMake((bounds.size.width - panelW) / 2.0f, 
-                                                           (bounds.size.height - panelH) / 2.0f, 
-                                                           panelW, panelH)];
+    g_panelView = [[UIView alloc] initWithFrame:CGRectMake((bounds.size.width - w) / 2, (bounds.size.height - h) / 2, w, h)];
+    g_panelView.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.16 alpha:0.97];
+    g_panelView.layer.cornerRadius = 14;
+    g_panelView.layer.borderWidth = 1.5;
+    g_panelView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:0.25 alpha:0.8].CGColor;
+    g_panelView.hidden = YES; // 默认隐藏
     
-    g_panelView.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.14 alpha:0.96];
-    g_panelView.layer.cornerRadius = 12;
-    g_panelView.layer.borderWidth = 1.5f;
-    g_panelView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.8 blue:0.2 alpha:0.7].CGColor;
-    g_panelView.hidden = YES; // Hidden by default, toggled by ball tap
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 10, w - 24, 24)];
+    lbl.text = @"⚡ 修仙修改器控制台 ⚡";
+    lbl.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.3 alpha:1.0];
+    lbl.font = [UIFont boldSystemFontOfSize:15];
+    lbl.textAlignment = NSTextAlignmentCenter;
+    [g_panelView addSubview:lbl];
     
-    // Title label
-    UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, panelW - 24, 26)];
-    titleLbl.text = @"⚡ 修仙修改器控制台 ⚡";
-    titleLbl.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.3 alpha:1.0];
-    titleLbl.font = [UIFont boldSystemFontOfSize:15];
-    titleLbl.textAlignment = NSTextAlignmentCenter;
-    [g_panelView addSubview:titleLbl];
+    // 增加高度，确保 ScrollView 内部所有 7 个按钮都能完整显示且不被截断
+    UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectMake(8, 40, w - 16, h - 90)];
+    sv.showsVerticalScrollIndicator = YES;
     
-    // ScrollView for buttons
-    UIScrollView *scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(8, 40, panelW - 16, panelH - 80)];
-    scrollView.showsVerticalScrollIndicator = YES;
-    scrollView.scrollsToTop = NO;
+    CGFloat y = 4, bh = 40, spacing = 8, bw = w - 24;
     
-    CGFloat btnY = 4;
-    CGFloat btnH = 38;
-    CGFloat btnSpacing = 7;
-    CGFloat btnW = panelW - 24;
+    NSArray *titles = @[
+        @"💎 领灵石 x20 (设置/商城点)",
+        @"⚒️ 炼丹/炼器 (制造界面点)",
+        @"🐾 灵宠洗练 (灵宠界面点)",
+        @"⚙️ GM全装注入:【已关闭】",
+        @"🎁 一键注入全装备 (背包点)",
+        @"🔇 全服公告拦截:【已开启】",
+        @"📊 切换 HUD 实时日志"
+    ];
     
-    // FIXED: Explicit Block type declaration (no auto keyword)
-    UIButton *(^makeBtn)(NSString *, UIColor *, SEL) = ^UIButton *(NSString *title, 
-                                                                   UIColor *bgColor, 
-                                                                   SEL action) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.frame = CGRectMake(0, btnY, btnW, btnH);
-        btn.backgroundColor = bgColor;
-        btn.layer.cornerRadius = 6;
-        btn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-        btn.titleLabel.numberOfLines = 2;
-        btn.titleEdgeInsets = UIEdgeInsetsMake(2, 8, 2, 8);
+    NSArray *colors = @[
+        [UIColor colorWithRed:0.15 green:0.35 blue:0.75 alpha:1.0],
+        [UIColor colorWithRed:0.18 green:0.55 blue:0.35 alpha:1.0],
+        [UIColor colorWithRed:0.45 green:0.25 blue:0.65 alpha:1.0],
+        [UIColor colorWithRed:0.28 green:0.28 blue:0.35 alpha:1.0],
+        [UIColor colorWithRed:0.75 green:0.20 blue:0.18 alpha:1.0],
+        [UIColor colorWithRed:0.20 green:0.45 blue:0.30 alpha:1.0],
+        [UIColor colorWithRed:0.30 g_color_placeholder:0.30 alpha:1.0] // fallback
+    ];
+    
+    NSArray *actions = @[
+        NSStringFromSelector(@selector(clickClaim)),
+        NSStringFromSelector(@selector(clickMake)),
+        NSStringFromSelector(@selector(clickPet)),
+        NSStringFromSelector(@selector(clickToggleF6:)),
+        NSStringFromSelector(@selector(clickInject)),
+        NSStringFromSelector(@selector(clickToggleAnnounce:)),
+        NSStringFromSelector(@selector(clickToggleHUD))
+    ];
+    
+    for (int i = 0; i < titles.count; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(0, y, bw, bh);
+        b.backgroundColor = (i == 6) ? [UIColor colorWithRed:0.35 green:0.35 blue:0.4 alpha:1.0] : colors[i];
+        b.layer.cornerRadius = 7;
+        b.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        [b setTitle:titles[i] forState:UIControlStateNormal];
+        [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         
-        [btn setTitle:title forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        
-        if (action != NULL) {
-            [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-        }
-        
-        return btn;
-    };
+        SEL act = NSSelectorFromString(actions[i]);
+        [b addTarget:self action:act forControlEvents:UIControlEventTouchUpInside];
+        [sv addSubview:b];
+        y += bh + spacing;
+    }
     
-    // Btn1: 领灵石
-    UIButton *b1 = makeBtn(@"💎 领灵石 x20\n(需打开设置/商城)", 
-                           [UIColor colorWithRed:0.15 green:0.35 blue:0.7 alpha:1.0], 
-                           @selector(actionClaimStones));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b1];
+    sv.contentSize = CGSizeMake(bw, y + 10);
+    [g_panelView addSubview:sv];
     
-    // Btn2: 制造/强化
-    UIButton *b2 = makeBtn(@"⚒️ 触发炼丹/炼器操作\n(需在制造界面)", 
-                           [UIColor colorWithRed:0.18 green:0.55 blue:0.35 alpha:1.0], 
-                           @selector(actionInstantMake));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b2];
-    
-    // Btn3: 灵宠洗练
-    UIButton *b3 = makeBtn(@"🐾 灵宠免费洗练\n(需在灵宠界面)", 
-                           [UIColor colorWithRed:0.45 green:0.25 blue:0.65 alpha:1.0], 
-                           @selector(actionFreePet));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b3];
-    
-    // Btn4: 功能六开关
-    UIButton *b4 = makeBtn(@"⚙️ GM全装注入:【已关闭】", 
-                           [UIColor colorWithRed:0.28 green:0.28 blue:0.35 alpha:1.0], 
-                           @selector(actionToggleF6));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b4];
-    
-    // Btn5: 执行功能六
-    UIButton *b5 = makeBtn(@"🎁 一键注入全装备\n(需在背包界面)", 
-                           [UIColor colorWithRed:0.75 green:0.2 blue:0.18 alpha:1.0], 
-                           @selector(actionInjectGear));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b5];
-    
-    // Btn6: 公告拦截开关
-    UIButton *b6 = makeBtn(@"🔇 全服公告拦截:【已开启】", 
-                           [UIColor colorWithRed:0.2 green:0.4 blue:0.3 alpha:1.0], 
-                           @selector(actionToggleAnnounce));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b6];
-    
-    // Btn7: HUD日志开关
-    UIButton *b7 = makeBtn(@"📊 切换HUD实时日志", 
-                           [UIColor colorWithRed:0.3 green:0.3 blue:0.38 alpha:1.0], 
-                           @selector(actionToggleHUD));
-    btnY += btnH + btnSpacing;
-    [scrollView addSubview:b7];
-    
-    scrollView.contentSize = CGSizeMake(btnW, btnY);
-    [g_panelView addSubview:scrollView];
-    
-    // Close button at bottom
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    closeBtn.frame = CGRectMake(12, panelH - 34, panelW - 24, 28);
-    closeBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.2 alpha:1.0];
-    closeBtn.layer.cornerRadius = 6;
-    closeBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    
-    [closeBtn setTitle:@"✕ 关闭控制台" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor lightGrayColor] forState:UIControlStateNormal];
-    [closeBtn addTarget:self action:@selector(toggleCustomPanel) forControlEvents:UIControlEventTouchUpInside];
-    [g_panelView addSubview:closeBtn];
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
+    close.frame = CGRectMake(12, h - 42, w - 24, 32);
+    close.backgroundColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.22 alpha:1.0];
+    close.layer.cornerRadius = 6;
+    [close setTitle:@"✕ 收起控制台" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor lightGrayColor] forState:UIControlStateNormal];
+    [close addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    [g_panelView addSubview:close];
     
     [parent addSubview:g_panelView];
 }
 
-#pragma mark - 悬浮球拖拽手势处理
-
-- (void)handleBallPan:(UIPanGestureRecognizer *)pan {
-    if (!self.floatBall || !self.floatBall.superview) return;
-    
-    UIView *superview = self.floatBall.superview;
-    CGPoint translation = [pan translationInView:superview];
-    
-    CGFloat newX = self.floatBall.center.x + translation.x;
-    CGFloat newY = self.floatBall.center.y + translation.y;
-    
-    // Keep ball within superview bounds (ball radius is 28)
-    CGRect bounds = superview.bounds;
-    newX = fmaxf(28, fminf(newX, bounds.size.width - 28));
-    newY = fmaxf(28, fminf(newY, bounds.size.height - 28));
-    
-    self.floatBall.center = CGPointMake(newX, newY);
-    [pan setTranslation:CGPointMake(0, 0) inView:superview];
-}
-
-#pragma mark - 面板显示切换
-
-- (void)toggleCustomPanel {
++ (void)togglePanel {
     if (!g_panelView) return;
-    
     g_panelView.hidden = !g_panelView.hidden;
-    self.floatBall.alpha = g_panelView.hidden ? 1.0f : 0.6f;
+    s_ball.alpha = g_panelView.hidden ? 1.0 : 0.6;
 }
 
-#pragma mark - 按钮事件分发（全部使用ARM64 SAFE强转）
-
-- (void)actionClaimStones {
-    AddLog(@"[INFO] ===== 点击:领灵石 =====");
-    [[ModManager shared] claimSpiritStonesLoop];
-}
-
-- (void)actionInstantMake {
-    AddLog(@"[INFO] ===== 点击:制造触发 =====");
-    [[ModManager shared] triggerMakeActions];
-}
-
-- (void)actionFreePet {
-    AddLog(@"[INFO] ===== 点击:灵宠洗练 =====");
-    [[ModManager shared] triggerPetRebirth];
-}
-
-- (void)actionToggleF6 {
-    g_feature6_enabled = !g_feature6_enabled;
-    
-    // Find and update the feature6 toggle button in panel view's scrollview
-    if (!g_panelView) return;
-    
-    for (UIView *subview in g_panelView.subviews) {
-        if ([subview isKindOfClass:[UIScrollView class]]) {
-            UIScrollView *sv = (UIScrollView *)subview;
-            
-            for (UIButton *btn in sv.subviews) {
-                NSString *title = btn.currentTitle ?: @"";
-                
-                if ([title rangeOfString:@"gm全装注入" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    [btn setTitle:g_feature6_enabled ? 
-                        @"⚙️ GM全装注入:【已开启】" : 
-                        @"⚙️ GM全装注入:【已关闭】" 
-                        forState:UIControlStateNormal];
-                    
-                    btn.backgroundColor = g_feature6_enabled ? 
-                        [UIColor colorWithRed:0.1 green:0.55 blue:0.2 alpha:1.0] : 
-                        [UIColor colorWithRed:0.28 green:0.28 blue:0.35 alpha:1.0];
-                    
-                    AddLog(g_feature6_enabled ? @"[⚙️] GM全装注入功能已开启" : @"[⚙️] GM全装注入功能已关闭");
-                    return;
-                }
-            }
-        }
-    }
-}
-
-- (void)actionInjectGear {
-    AddLog(@"[INFO] ===== 点击:GM全装注入 =====");
-    [[ModManager shared] triggerFeature6];
-}
-
-- (void)actionToggleAnnounce {
-    g_intercept_announce = !g_intercept_announce;
-    
-    // Find and update announce toggle button
-    if (!g_panelView) return;
-    
-    for (UIView *subview in g_panelView.subviews) {
-        if ([subview isKindOfClass:[UIScrollView class]]) {
-            UIScrollView *sv = (UIScrollView *)subview;
-            
-            for (UIButton *btn in sv.subviews) {
-                NSString *title = btn.currentTitle ?: @"";
-                
-                if ([title rangeOfString:@"公告拦截" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    [btn setTitle:g_intercept_announce ? 
-                        @"🔇 全服公告拦截:【已开启】" : 
-                        @"🔊 全服公告拦截:【已关闭】" 
-                        forState:UIControlStateNormal];
-                    
-                    AddLog(g_intercept_announce ? @"[🛡️] 公告拦截已开启" : @"[🛡️] 公告拦截已关闭");
-                    return;
-                }
-            }
-        }
-    }
-}
-
-- (void)actionToggleHUD {
++ (void)clickClaim { [[ModManager shared] claimSpiritStonesLoop]; }
++ (void)clickMake { [[ModManager shared] triggerMakeActions]; }
++ (void)clickPet { [[ModManager shared] triggerPetRebirth]; }
++ (void)clickInject { [[ModManager shared] triggerFeature6]; }
++ (void)clickToggleHUD {
     g_hudVisible = !g_hudVisible;
-    
-    if (g_logView) {
-        g_logView.hidden = !g_hudVisible;
-    }
-    
-    AddLog(g_hudVisible ? @"[📊] HUD日志面板已显示" : @"[📊] HUD日志面板已隐藏");
+    if (g_logView) g_logView.hidden = !g_hudVisible;
+}
+
++ (void)clickToggleF6:(UIButton *)btn {
+    g_feature6_enabled = !g_feature6_enabled;
+    [btn setTitle:g_feature6_enabled ? @"⚙️ GM全装注入:【已开启】" : @"⚙️ GM全装注入:【已关闭】" forState:UIControlStateNormal];
+    btn.backgroundColor = g_feature6_enabled ? [UIColor colorWithRed:0.1 green:0.55 blue:0.2 alpha:1.0] : [UIColor colorWithRed:0.28 green:0.28 blue:0.35 alpha:1.0];
+    AddLog(g_feature6_enabled ? @"[⚙️] 功能六已开启" : @"[⚙️] 功能六已关闭");
+}
+
++ (void)clickToggleAnnounce:(UIButton *)btn {
+    g_intercept_announce = !g_intercept_announce;
+    [btn setTitle:g_intercept_announce ? @"🔇 全服公告拦截:【已开启】" : @"🔊 全服公告拦截:【已关闭】" forState:UIControlStateNormal];
+    AddLog(g_intercept_announce ? @"[🛡️] 公告拦截已开启" : @"[🛡️] 公告拦截已关闭");
 }
 
 @end
 
-#pragma mark - ============ dylib入口：构造器（Hook安装） ============
+#pragma mark - ============ 构造器入口 ============
 
-__attribute__((constructor(100))) // Lower number = earlier priority
+__attribute__((constructor))
 static void BlackEraModMain(void) {
-    AddLog(@"[INIT] BlackEra Mod v3 开始加载...");
-    
     @autoreleasepool {
-        // === Hook 1: BmobCloud ===
+        AddLog(@"[INIT] BlackEra Mod 正在挂载Hook...");
+        
         Class bcloudClass = objc_getClass("BmobCloud");
-        
-        if (!bcloudClass) {
-            AddLog(@"[⚠️] BmobCloud class not found - announcements may use different path");
-        } else {
-            SEL sel = @selector(callFunctionInBackground:withParameters:block:);
-            Method m = class_getInstanceMethod(bcloudClass, sel);
-            
-            if (!m) {
-                AddLog(@"[⚠️] BmobCloud::callFunctionInBackground:not found");
-                
-                // Debug list available methods
-                unsigned int count;
-                Method *methods = class_copyMethodList(bcloudClass, &count);
-                if (methods) {
-                    AddLog(@"[DEBUG] Available BmobCloud methods:");
-                    
-                    for (unsigned int i = 0; i < MIN(count, 15u); i++) {
-                        SEL s = method_getName(methods[i]);
-                        AddLog([NSString stringWithFormat:@"  - %@", NSStringFromSelector(s)]);
-                    }
-                    
-                    free(methods);
-                }
-            } else {
-                IMP origImp = method_setImplementation(m, (IMP)BE_Bcloud_CallFunc);
-                orig_bcloud_callFunc_IMP = origImp;
-                
-                if (!orig_bcloud_callFunc_IMP) {
-                    AddLog(@"[❌] Failed to save original BmobCloud IMP");
-                } else {
-                    AddLog(@"[✓] BmobCloud hook installed successfully");
-                }
+        if (bcloudClass) {
+            Method m = FindMethodContains(bcloudClass, @"callFunction");
+            if (m) {
+                orig_bcloud_callFunc_IMP = method_setImplementation(m, (IMP)BE_Bcloud_CallFunc);
+                AddLog(@"[✓] BmobCloud 拦截挂载成功");
             }
         }
         
-        // === Hook 2: BmobSocketIO ===
         Class socketClass = objc_getClass("BmobSocketIO");
-        
-        if (!socketClass) {
-            AddLog(@"[⚠️] BmobSocketIO class not found - may be loaded dynamically later");
-        } else {
-            SEL sel2 = @selector(sendEvent:withData:);
-            Method m2 = class_getInstanceMethod(socketClass, sel2);
-            
-            if (!m2) {
-                AddLog(@"[⚠️] BmobSocketIO::sendEvent:withData: not found");
-                
-                // Debug list available methods
-                unsigned int count;
-                Method *methods = class_copyMethodList(socketClass, &count);
-                if (methods) {
-                    AddLog(@"[DEBUG] Available BmobSocketIO methods:");
-                    
-                    for (unsigned int i = 0; i < MIN(count, 15u); i++) {
-                        SEL s = method_getName(methods[i]);
-                        AddLog([NSString stringWithFormat:@"  - %@", NSStringFromSelector(s)]);
-                    }
-                    
-                    free(methods);
-                }
-            } else {
-                IMP origImp2 = method_setImplementation(m2, (IMP)BE_SocketIO_SendEvent);
-                orig_sendEvent_IMP = origImp2;
-                
-                if (!orig_sendEvent_IMP) {
-                    AddLog(@"[❌] Failed to save original SocketIO IMP");
-                } else {
-                    AddLog(@"[✓] BmobSocketIO hook installed successfully");
-                }
+        if (!socketClass) socketClass = objc_getClass("SocketManager");
+        if (socketClass) {
+            Method m2 = FindMethodContains(socketClass, @"sendEvent");
+            if (m2) {
+                orig_sendEvent_IMP = method_setImplementation(m2, (IMP)BE_SocketIO_SendEvent);
+                AddLog(@"[✓] SocketIO 拦截挂载成功");
             }
         }
         
-        // === Show floating ball after game UI settles ===
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), 
-                       dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [FloatingMenuUI showFloatingBall];
         });
-        
-        AddLog(@"[INIT] Hook安装完成，等待游戏加载...");
     }
 }
