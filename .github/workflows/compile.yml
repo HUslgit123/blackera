@@ -1,4 +1,4 @@
-name: Build BlackEra Mod v3
+name: Build BlackEra Mod
 
 on: workflow_dispatch
 
@@ -16,14 +16,14 @@ jobs:
           -miphoneos-version-min=13.0 \
           -dynamiclib \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -install_name @rpath/BlackEra_Mod_v3.dylib \
-          -o BlackEra_Mod_v3.dylib \
-          BlackEra_Mod_v3.m \
+          -install_name @rpath/BlackEra_Mod.dylib \
+          -o BlackEra_Mod.dylib \
+          BlackEra_Mod.m \
           -framework UIKit \
           -framework Foundation
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: BlackEra_Mod_v3
-        path: BlackEra_Mod_v3.dylib
+        name: BlackEra_Mod
+        path: BlackEra_Mod.dylib
