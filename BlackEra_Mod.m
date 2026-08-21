@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#include <mach-o/dyld.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <time.h>
@@ -15,11 +14,6 @@ static NSMutableArray *g_logs     = nil;
 static UITextView     *g_logView  = nil;
 static BOOL           g_hudVisible= NO;
 static UIView         *g_panelView= nil;
-
-// 计算 ASLR 真实内存地址
-static uintptr_t get_real_addr(uintptr_t static_addr) {
-    return _dyld_get_image_vmaddr_slide(0) + static_addr;
-}
 
 #pragma mark - ============ 日志系统 ============
 
@@ -53,15 +47,61 @@ static void AddLog(NSString *msg) {
     });
 }
 
-#pragma mark - ============ 第一项：绝对拦截所有上报公告 ============
+#pragma mark - ============ 辅助：遍历查找当前活跃的 ViewController ============
+
+static id FindVC(Class targetClass, UIViewController *root) {
+    if (!root || !targetClass) return nil;
+    if ([root isKindOfClass:targetClass]) return root;
+    
+    if ([root isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)root;
+        for (UIViewController *vc in nav.viewControllers) {
+            id found = FindVC(targetClass, vc);
+            if (found) return found;
+        }
+    }
+    
+    if ([root isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *tab = (UITabBarController *)root;
+        for (UIViewController *vc in tab.viewControllers) {
+            id found = FindVC(targetClass, vc);
+            if (found) return found;
+        }
+    }
+    
+    for (UIViewController *child in root.childViewControllers) {
+        id found = FindVC(targetClass, child);
+        if (found) return found;
+    }
+    
+    if (root.presentedViewController) {
+        id found = FindVC(targetClass, root.presentedViewController);
+        if (found) return found;
+    }
+    
+    return nil;
+}
+
+static id GetActiveVC(const char *className) {
+    Class cls = objc_getClass(className);
+    if (!cls) return nil;
+    
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        id found = FindVC(cls, w.rootViewController);
+        if (found) return found;
+    }
+    return nil;
+}
+
+#pragma mark - ============ 功能一：绝对拦截所有上报公告 ============
 
 static IMP orig_bcloud_callFunc_IMP = NULL;
 static void BE_Bcloud_CallFunc(id self, SEL _cmd, NSString *functionName, NSDictionary *params, void (^block)(id result, NSError *error)) {
     if (g_intercept_announce && functionName && 
        ([functionName rangeOfString:@"SendSystemMessage" options:NSCaseInsensitiveSearch].location != NSNotFound ||
         [functionName rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
-        AddLog(@"[🛡️公告已拦截] 阻止向全服发送系统广播");
-        if (block) block(@[@"success"], nil);
+        AddLog(@"[🛡️公告已拦截] 已阻断向全服发送系统广播");
+        if (block) block(@[@"success"], nil); // 伪造成功回调防止挂起
         return;
     }
     if (orig_bcloud_callFunc_IMP) {
@@ -82,36 +122,13 @@ static void BE_SocketIO_SendEvent(id self, SEL _cmd, NSString *event, id data) {
     }
 }
 
-#pragma mark - ============ 原生广告点击劫持（秒发奖） ============
-
-static IMP orig_OptionVC_adClick_IMP = NULL;
-static void BE_OptionVC_adClick(id self, SEL _cmd, id sender) {
-    AddLog(@"[💎] 触发设置界面免看广告，直接下发 20 灵石");
-    typedef void (*ClaimFunc_t)(void);
-    ClaimFunc_t claim = (ClaimFunc_t)get_real_addr(0x1000703e8);
-    claim();
-}
-
-static IMP orig_ShopVC_adClick_IMP = NULL;
-static void BE_ShopVC_adClick(id self, SEL _cmd, id sender) {
-    AddLog(@"[💎] 触发商城界面免看广告，直接下发 20 灵石");
-    SEL sel = @selector(gdt_rewardVideoAdDidRewardEffective:info:);
-    if ([self respondsToSelector:sel]) {
-        ((void (*)(id, SEL, id, id))objc_msgSend)(self, sel, nil, nil);
-    } else {
-        typedef void (*ClaimFunc_t)(void);
-        ClaimFunc_t claim = (ClaimFunc_t)get_real_addr(0x1000703e8);
-        claim();
-    }
-}
-
-#pragma mark - ============ 业务功能执行 ============
+#pragma mark - ============ 核心业务安全调度类 ============
 
 @interface ModManager : NSObject
 + (instancetype)shared;
 - (void)claimSpiritStonesLoop;
-- (void)instantMakeComplete;
-- (void)freePetRebirth;
+- (void)triggerMakeActions;
+- (void)triggerPetRebirth;
 - (void)triggerFeature6;
 @end
 
@@ -124,46 +141,121 @@ static void BE_ShopVC_adClick(id self, SEL _cmd, id sender) {
     return inst;
 }
 
-// 灵石循环领取：间隔 0.5 秒 x 20 次
+// 功能二：0.5 秒间隔领取灵石 x 20 次
 - (void)claimSpiritStonesLoop {
-    AddLog(@"[💎] 启动灵石连刷: 0.5s/次 x 20次");
-    typedef void (*ClaimFunc_t)(void);
-    ClaimFunc_t claim = (ClaimFunc_t)get_real_addr(0x1000703e8);
-    
-    for (int i = 0; i < 20; i++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            claim();
-            AddLog([NSString stringWithFormat:@"[✓] 灵石到账第 %d/20 次 (+20灵石)", i + 1]);
-        });
+    @try {
+        id optVC = GetActiveVC("OptionViewController") ?: GetActiveVC("ShopViewController");
+        if (!optVC) {
+            AddLog(@"[⚠️] 请先在游戏中打开【设置】或【商城】界面后再点击！");
+            return;
+        }
+        
+        SEL sel1 = @selector(gdt_rewardVideoAdDidRewardEffective:info:);
+        SEL sel2 = @selector(gdt_rewardVideoAdDidRewardEffective:);
+        SEL targetSel = [optVC respondsToSelector:sel1] ? sel1 : ([optVC respondsToSelector:sel2] ? sel2 : nil);
+        
+        if (!targetSel) {
+            AddLog(@"[❌] 当前界面未找到发奖回调接口！");
+            return;
+        }
+        
+        AddLog(@"[💎] 启动免看广告领灵石: 0.5s/次 x 20次");
+        for (int i = 0; i < 20; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                @try {
+                    if (targetSel == sel1) {
+                        ((void (*)(id, SEL, id, id))objc_msgSend)(optVC, targetSel, nil, nil);
+                    } else {
+                        ((void (*)(id, SEL, id))objc_msgSend)(optVC, targetSel, nil);
+                    }
+                    AddLog([NSString stringWithFormat:@"[✓] 灵石到账第 %d/20 次 (+20 灵石)", i + 1]);
+                } @catch (NSException *e) {
+                    AddLog([NSString stringWithFormat:@"[❌] 发奖异常: %@", e.reason]);
+                }
+            });
+        }
+    } @catch (NSException *e) {
+        AddLog([NSString stringWithFormat:@"[❌] 异常: %@", e.reason]);
     }
 }
 
-// 制造秒完成
-- (void)instantMakeComplete {
-    typedef void (*MakeFunc_t)(long);
-    MakeFunc_t make = (MakeFunc_t)get_real_addr(0x10031f14c);
-    make(5);
-    AddLog(@"[⚒️] 炼丹/炼器 0 秒极速完成！");
+// 功能三与四：制造与强化
+- (void)triggerMakeActions {
+    @try {
+        id makeVC = GetActiveVC("MakeViewController");
+        if (!makeVC) {
+            AddLog(@"[⚠️] 请先在游戏中打开【制造/炼器/炼丹】界面！");
+            return;
+        }
+        
+        // 触发制造点击
+        SEL sel = @selector(clickButtonWithButton:);
+        if ([makeVC respondsToSelector:sel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(makeVC, sel, nil);
+            AddLog(@"[⚒️] 已触发制造/强化核心处理！");
+        } else {
+            AddLog(@"[❌] 未找到制造交互接口！");
+        }
+    } @catch (NSException *e) {
+        AddLog([NSString stringWithFormat:@"[❌] 制造异常: %@", e.reason]);
+    }
 }
 
-// 灵宠免费洗练/重置
-- (void)freePetRebirth {
-    typedef void (*RebirthFunc_t)(void);
-    RebirthFunc_t rebirth = (RebirthFunc_t)get_real_addr(0x10077a7f4);
-    rebirth();
-    AddLog(@"[🐾] 灵宠 0 灵石免费重置资质已完成！");
+// 功能五：灵宠洗练与资质重置
+- (void)triggerPetRebirth {
+    @try {
+        id petVC = GetActiveVC("PetViewController") ?: GetActiveVC("LingchongViewController");
+        if (!petVC) {
+            AddLog(@"[⚠️] 请先在游戏中打开【灵宠】界面！");
+            return;
+        }
+        
+        SEL sel = @selector(clickButtonWith_button:);
+        if (![petVC respondsToSelector:sel]) {
+            sel = @selector(clickButtonWithButton:);
+        }
+        
+        if ([petVC respondsToSelector:sel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(petVC, sel, nil);
+            AddLog(@"[🐾] 已向灵宠控制器发送免费洗练/突破指令！");
+        } else {
+            AddLog(@"[❌] 未找到灵宠交互接口！");
+        }
+    } @catch (NSException *e) {
+        AddLog([NSString stringWithFormat:@"[❌] 灵宠异常: %@", e.reason]);
+    }
 }
 
-// 功能六：GM全装备注入
+// 功能六：GM全装备材料注入
 - (void)triggerFeature6 {
-    if (!g_feature6_enabled) {
-        AddLog(@"[⚠️] 功能六当前处于关闭状态，请先点击上方按钮开启！");
-        return;
+    @try {
+        if (!g_feature6_enabled) {
+            AddLog(@"[⚠️] 功能六当前处于关闭状态，请先点击上方按钮开启！");
+            return;
+        }
+        
+        id bagVC = GetActiveVC("BagViewController");
+        if (!bagVC) {
+            AddLog(@"[⚠️] 请先在游戏中打开【背包】界面后再点击！");
+            return;
+        }
+        
+        // 优先触发 CZ 充值调试 / GM 按钮
+        SEL czSel = @selector(clickCZButtonWithButton:);
+        SEL gmSel = @selector(clickGMButtonWithButton:);
+        
+        if ([bagVC respondsToSelector:czSel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(bagVC, czSel, nil);
+            AddLog(@"[🎁] 已触发背包 CZ 充值与全装备注入！");
+        } else if ([bagVC respondsToSelector:gmSel]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(bagVC, gmSel, nil);
+            AddLog(@"[🎁] 已触发背包 GM 调试菜单！");
+        } else {
+            AddLog(@"[❌] 背包控制器中未找到调试方法！");
+        }
+    } @catch (NSException *e) {
+        AddLog([NSString stringWithFormat:@"[❌] GM注入异常: %@", e.reason]);
     }
-    typedef void (*GMInjectFunc_t)(void *);
-    GMInjectFunc_t inject = (GMInjectFunc_t)get_real_addr(0x1005e7944);
-    inject(NULL);
-    AddLog(@"[🎁] 一键全装备与材料注入指令已执行！");
 }
 
 @end
@@ -177,13 +269,13 @@ static void BE_ShopVC_adClick(id self, SEL _cmd, id sender) {
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hitView = [super hitTest:point withEvent:event];
     if (hitView == self || hitView == self.rootViewController.view) {
-        return nil; // 只有点到按钮或面板时才拦截，其余区域点击直接穿透到游戏
+        return nil; // 点击空白区域穿透到游戏
     }
     return hitView;
 }
 @end
 
-#pragma mark - ============ 自定义原生悬浮控制台 (告别脆弱的 UIAlertController) ============
+#pragma mark - ============ 原生暗黑风格悬浮控制台 ============
 
 @interface FloatingMenuUI : NSObject
 @end
@@ -222,16 +314,13 @@ static UIButton *s_floatBall = nil;
         vc.view.backgroundColor = [UIColor clearColor];
         s_overlayWin.rootViewController = vc;
         
-        // 1. 悬浮球 (左下角，可拖拽)
+        // 悬浮球 (左下角，支持拖拽)
         s_floatBall = [UIButton buttonWithType:UIButtonTypeCustom];
         s_floatBall.frame = CGRectMake(15, screenBounds.size.height - 140, 56, 56);
         s_floatBall.backgroundColor = [UIColor colorWithRed:0.0 green:0.75 blue:0.1 alpha:0.9];
         s_floatBall.layer.cornerRadius = 28;
         s_floatBall.layer.borderWidth = 2.0;
         s_floatBall.layer.borderColor = [UIColor whiteColor].CGColor;
-        s_floatBall.layer.shadowColor = [UIColor blackColor].CGColor;
-        s_floatBall.layer.shadowOffset = CGSizeMake(0, 3);
-        s_floatBall.layer.shadowOpacity = 0.5;
         [s_floatBall setTitle:@"作弊" forState:UIControlStateNormal];
         [s_floatBall setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         s_floatBall.titleLabel.font = [UIFont boldSystemFontOfSize:14];
@@ -242,7 +331,7 @@ static UIButton *s_floatBall = nil;
         [s_floatBall addTarget:self action:@selector(toggleCustomPanel) forControlEvents:UIControlEventTouchUpInside];
         [vc.view addSubview:s_floatBall];
         
-        // 2. 自定义控制面板 (初始隐藏)
+        // 构建控制面板
         [self buildCustomPanelInView:vc.view screenBounds:screenBounds];
         
         [s_overlayWin makeKeyAndVisible];
@@ -251,14 +340,12 @@ static UIButton *s_floatBall = nil;
     });
 }
 
-// 悬浮球拖拽手势
 + (void)handleBallPan:(UIPanGestureRecognizer *)pan {
     CGPoint trans = [pan translationInView:pan.view.superview];
     pan.view.center = CGPointMake(pan.view.center.x + trans.x, pan.view.center.y + trans.y);
-    [pan setTranslation:CGPointZero inView:pan.view.superview];
+    [pan setTranslation:CGPointMake(0, 0) inView:pan.view.superview];
 }
 
-// 构建原生暗黑控制面板
 + (void)buildCustomPanelInView:(UIView *)parent screenBounds:(CGRect)bounds {
     CGFloat panelW = MIN(320, bounds.size.width - 40);
     CGFloat panelH = 390;
@@ -268,13 +355,9 @@ static UIButton *s_floatBall = nil;
     g_panelView.layer.cornerRadius = 16;
     g_panelView.layer.borderWidth = 1.5;
     g_panelView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.8 blue:0.2 alpha:0.8].CGColor;
-    g_panelView.layer.shadowColor = [UIColor blackColor].CGColor;
-    g_panelView.layer.shadowOffset = CGSizeMake(0, 5);
-    g_panelView.layer.shadowOpacity = 0.6;
     g_panelView.clipsToBounds = YES;
-    g_panelView.hidden = YES; // 默认隐藏
+    g_panelView.hidden = YES;
     
-    // 标题栏
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, panelW - 32, 24)];
     titleLabel.text = @"⚡ 修仙修改器控制台 ⚡";
     titleLabel.textColor = [UIColor colorWithRed:0.0 green:0.9 blue:0.3 alpha:1.0];
@@ -282,7 +365,6 @@ static UIButton *s_floatBall = nil;
     titleLabel.textAlignment = NSTextAlignmentCenter;
     [g_panelView addSubview:titleLabel];
     
-    // 滚动区域
     UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(12, 44, panelW - 24, panelH - 95)];
     scroll.showsVerticalScrollIndicator = YES;
     
@@ -292,19 +374,19 @@ static UIButton *s_floatBall = nil;
     CGFloat btnW = panelW - 24;
     
     // 按钮 1：领灵石
-    UIButton *b1 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"💎 领灵石 (0.5s/次 x 20下)" bg:[UIColor colorWithRed:0.18 green:0.4 blue:0.8 alpha:1.0]];
+    UIButton *b1 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"💎 领灵石 (设置/商城界面点)" bg:[UIColor colorWithRed:0.18 green:0.4 blue:0.8 alpha:1.0]];
     [b1 addTarget:self action:@selector(actionClaimStones) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:b1];
     btnY += btnH + btnSpacing;
     
-    // 按钮 2：制造秒完成
-    UIButton *b2 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"⚒️ 炼丹/炼器 0秒极速完成" bg:[UIColor colorWithRed:0.2 green:0.6 blue:0.4 alpha:1.0]];
+    // 按钮 2：制造/强化
+    UIButton *b2 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"⚒️ 炼丹/炼器/强化 (制造界面点)" bg:[UIColor colorWithRed:0.2 green:0.6 blue:0.4 alpha:1.0]];
     [b2 addTarget:self action:@selector(actionInstantMake) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:b2];
     btnY += btnH + btnSpacing;
 
-    // 按钮 3：灵宠免费洗练
-    UIButton *b3 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"🐾 灵宠 0灵石重置/洗练" bg:[UIColor colorWithRed:0.5 green:0.3 blue:0.7 alpha:1.0]];
+    // 按钮 3：灵宠洗练
+    UIButton *b3 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"🐾 灵宠洗练/重置 (灵宠界面点)" bg:[UIColor colorWithRed:0.5 green:0.3 blue:0.7 alpha:1.0]];
     [b3 addTarget:self action:@selector(actionFreePet) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:b3];
     btnY += btnH + btnSpacing;
@@ -316,7 +398,7 @@ static UIButton *s_floatBall = nil;
     btnY += btnH + btnSpacing;
 
     // 按钮 5：执行功能六
-    UIButton *b5 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"🎁 一键注入全装备与材料" bg:[UIColor colorWithRed:0.8 green:0.25 blue:0.2 alpha:1.0]];
+    UIButton *b5 = [self makeButtonWithFrame:CGRectMake(0, btnY, btnW, btnH) title:@"🎁 一键注入全装备材料 (背包点)" bg:[UIColor colorWithRed:0.8 green:0.25 blue:0.2 alpha:1.0]];
     [b5 addTarget:self action:@selector(actionInjectGear) forControlEvents:UIControlEventTouchUpInside];
     [scroll addSubview:b5];
     btnY += btnH + btnSpacing;
@@ -336,7 +418,6 @@ static UIButton *s_floatBall = nil;
     scroll.contentSize = CGSizeMake(btnW, btnY);
     [g_panelView addSubview:scroll];
     
-    // 底部关闭按钮
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     closeBtn.frame = CGRectMake(16, panelH - 44, panelW - 32, 36);
     closeBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.22 alpha:1.0];
@@ -349,11 +430,11 @@ static UIButton *s_floatBall = nil;
 
     [parent addSubview:g_panelView];
     
-    // HUD 日志视图 (置于面板右上方)
-    g_logView = [[UITextView alloc] initWithFrame:CGRectMake(bounds.size.width - 240, 40, 230, 140)];
-    g_logView.font = [UIFont fontWithName:@"Menlo" size:8.5];
+    // HUD 日志视图
+    g_logView = [[UITextView alloc] initWithFrame:CGRectMake(bounds.size.width - 250, 40, 240, 150)];
+    g_logView.font = [UIFont fontWithName:@"Menlo" size:9];
     g_logView.textColor = [UIColor greenColor];
-    g_logView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    g_logView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
     g_logView.layer.cornerRadius = 8;
     g_logView.editable = NO;
     g_logView.hidden = YES;
@@ -383,11 +464,11 @@ static UIButton *s_floatBall = nil;
 }
 
 + (void)actionInstantMake {
-    [[ModManager shared] instantMakeComplete];
+    [[ModManager shared] triggerMakeActions];
 }
 
 + (void)actionFreePet {
-    [[ModManager shared] freePetRebirth];
+    [[ModManager shared] triggerPetRebirth];
 }
 
 + (void)actionToggleF6:(UIButton *)btn {
@@ -417,7 +498,7 @@ static UIButton *s_floatBall = nil;
 
 @end
 
-#pragma mark - ============ 构造器入口 ============
+#pragma mark - ============ 构造器安全入口 ============
 
 __attribute__((constructor))
 static void BlackEraModMain(void) {
@@ -438,18 +519,5 @@ static void BlackEraModMain(void) {
     if (BSI) {
         Method m1 = class_getInstanceMethod(BSI, @selector(sendEvent:withData:));
         if (m1) orig_sendEvent_IMP = method_setImplementation(m1, (IMP)BE_SocketIO_SendEvent);
-    }
-
-    // 3. 原生看广告按钮直接发奖 Hook
-    Class OptVC = objc_getClass("OptionViewController");
-    if (OptVC) {
-        Method mOpt = class_getInstanceMethod(OptVC, @selector(gdt_rewardVideoAdDidRewardEffective:info:));
-        if (mOpt) orig_OptionVC_adClick_IMP = method_setImplementation(mOpt, (IMP)BE_OptionVC_adClick);
-    }
-    
-    Class ShopVC = objc_getClass("ShopViewController");
-    if (ShopVC) {
-        Method mShop = class_getInstanceMethod(ShopVC, @selector(gdt_rewardVideoAdDidRewardEffective:info:));
-        if (mShop) orig_ShopVC_adClick_IMP = method_setImplementation(mShop, (IMP)BE_ShopVC_adClick);
     }
 }
